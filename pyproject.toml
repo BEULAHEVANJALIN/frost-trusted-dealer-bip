@@ -1,0 +1,10 @@
+[project]
+name = "frost-trusted-dealer-bip"
+version = "0.0.1"
+requires-python = ">=3.9"
+dependencies = []
+description = "Reference helpers for FROST Trusted Dealer"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
