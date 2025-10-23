@@ -1,3 +1,6 @@
 [submodule "external/external/secp256k1lab"]
 	path = external/external/secp256k1lab
 	url = https://github.com/secp256k1lab/secp256k1lab
+[submodule "external/secp256k1lab"]
+	path = external/secp256k1lab
+	url = https://github.com/secp256k1lab/secp256k1lab
