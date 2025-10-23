@@ -1,0 +1,431 @@
+= Title: FROST Trusted Dealer (Keypath-only) =
+; Author: Beulah Evanjalin beulahebenezer777@gmail.com
+; Status: Draft
+; Type: Standards Track
+; Created: 2025-10-23
+; License: MIT (code), CC-BY-4.0 (text)
+
+== Abstract ==
+This document specifies a Trusted Dealer FROST threshold scheme.
+
+== Algorithms ==
+The following specification of the algorithms has been written with a focus on clarity.
+As a result, the specified algorithms are not always optimal in terms of computation and space.
+
+=== Notation ===
+
+The following conventions are used, with constants as defined for [https://www.secg.org/sec2-v2.pdf secp256k1]. We note that adapting this proposal to other elliptic curves is not straightforward and can result in an insecure scheme.
+* Lowercase variables represent integers or byte arrays.
+** The constant ''p'' refers to the field size, ''0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F''.
+** The constant ''n'' refers to the curve order, ''0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141''.
+* Uppercase variables refer to points on the curve with equation ''y<sup>2</sup> = x<sup>3</sup> + 7'' over the integers modulo ''p''.
+** ''is_infinite(P)'' returns whether ''P'' is the point at infinity.
+** ''x(P)'' and ''y(P)'' are integers in the range ''0..p-1'' and refer to the X and Y coordinates of a point ''P'' (assuming it is not infinity).
+** The constant ''G'' refers to the base point, for which ''x(G) = 0x79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798'' and ''y(G) = 0x483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8''.
+** Addition of points refers to the usual [https://en.wikipedia.org/wiki/Elliptic_curve#The_group_law elliptic curve group operation].
+** [https://en.wikipedia.org/wiki/Elliptic_curve_point_multiplication Multiplication (⋅) of an integer and a point] refers to the repeated application of the group operation.
+* Functions and operations:
+** ''||'' refers to byte array concatenation.
+** ''⊕'' is byte-wise ⊕ on equal-length byte strings.
+** The function ''x[i:j]'', where ''x'' is a byte array and ''i, j &ge; 0'', returns a ''(j - i)''-byte array with a copy of the ''i''-th byte (inclusive) to the ''j''-th byte (exclusive) of ''x''.
+** The function ''bytes(n, x)'', where ''x'' is an integer, returns the n-byte encoding of ''x'', most significant byte first.
+** The constant ''empty_bytestring'' refers to the empty byte array. It holds that ''len(empty_bytestring) = 0''.
+** The function ''xbytes(P)'', where ''P'' is a point for which ''not is_infinite(P)'', returns ''bytes(32, x(P))''.
+** The function ''len(x)'' where ''x'' is a byte array returns the length of the array.
+** The function ''has_even_y(P)'', where ''P'' is a point for which ''not is_infinite(P)'', returns ''y(P) mod 2 == 0''.
+** The function ''with_even_y(P)'', where ''P'' is a point, returns ''P'' if ''is_infinite(P)'' or ''has_even_y(P)''. Otherwise,  ''with_even_y(P)'' returns ''-P''.
+** The function ''cbytes(P)'', where ''P'' is a point for which ''not is_infinite(P)'', returns ''a || xbytes(P)'' where ''a'' is a byte that is ''2'' if ''has_even_y(P)'' and ''3'' otherwise.
+** The function ''cbytes_ext(P)'', where ''P'' is a point, returns ''bytes(33, 0)'' if ''is_infinite(P)''. Otherwise, it returns ''cbytes(P)''.
+** The function ''int(x)'', where ''x'' is a 32-byte array, returns the 256-bit unsigned integer whose most significant byte first encoding is ''x''.
+** The function ''lift_x(x)'', where ''x'' is an integer in range ''0..2<sup>256</sup>-1'', returns the point ''P'' for which ''x(P) = x''<ref>
+    Given a candidate X coordinate ''x'' in the range ''0..p-1'', there exist either exactly two or exactly zero valid Y coordinates. If no valid Y coordinate exists, then ''x'' is not a valid X coordinate either, i.e., no point ''P'' exists for which ''x(P) = x''. The valid Y coordinates for a given candidate ''x'' are the square roots of ''c = x<sup>3</sup> + 7 mod p'' and they can be computed as ''y = &plusmn;c<sup>(p+1)/4</sup> mod p'' (see [https://en.wikipedia.org/wiki/Quadratic_residue#Prime_or_prime_power_modulus Quadratic residue]) if they exist, which can be checked by squaring and comparing with ''c''.</ref> and ''has_even_y(P)'', or fails if ''x'' is greater than ''p-1'' or no such point exists. The function ''lift_x(x)'' is equivalent to the following pseudocode:
+*** Fail if ''x &gt; p-1''.
+*** Let ''c = x<sup>3</sup> + 7 mod p''.
+*** Let ''y' = c<sup>(p+1)/4</sup> mod p''.
+*** Fail if ''c &ne; y'<sup>2</sup> mod p''.
+*** Let ''y = y' '' if ''y' mod 2 = 0'', otherwise let ''y = p - y' ''.
+*** Return the unique point ''P'' such that ''x(P) = x'' and ''y(P) = y''.
+** The function ''cpoint(x)'', where ''x'' is a 33-byte array (compressed serialization), sets ''P = lift_x(int(x[1:33]))'' and fails if that fails. If ''x[0] = 2'' it returns ''P'' and if ''x[0] = 3'' it returns ''-P''. Otherwise, it fails.
+** The function ''cpoint_ext(x)'', where ''x'' is a 33-byte array (compressed serialization), returns the point at infinity if ''x = bytes(33, 0)''. Otherwise, it returns ''cpoint(x)'' and fails if that fails.
+** The function ''hash<sub>tag</sub>(x)'' where ''tag'' is a UTF-8 encoded tag name and ''x'' is a byte array returns the 32-byte hash ''SHA256(SHA256(tag) || SHA256(tag) || x)''.
+** The function ''modinv(z)'' returns the multiplicative inverse of nonzero ''z mod n''. Fail if ''z ≡ 0 (mod n)''.
+* Scalars and reductions:
+** Unless stated otherwise, scalar additions/multiplications/negations are computed modulo ''n'' and then represented as 32-byte big-endian via ''bytes(32, ·)'' when serialized.
+** When a 32-byte string is interpreted ''as a scalar'', it means ''int(x) mod n''. Algorithms that require nonzero scalars will explicitly fail on result ''0''.
+** Tuples are written by listing the elements within parentheses and separated by commas. For example, ''(2, 3, 1)'' is a tuple.
+* Signer identifiers:
+** Each participant has a unique positive integer identifier ''id ∈ {1,2,…}''. Identifiers must be unique within a session.
+** Identifiers are interpreted as integers when computing Lagrange coefficients; arithmetic for these coefficients is performed modulo ''n''.
+** As a practical constraint, implementations should restrict ''id'' to a small nonzero 32-bit unsigned integer and must ensure all ''id'' values are distinct. Collisions modulo ''n'' are impossible under this constraint.
+* Encodings used elsewhere in this spec:
+** ''ser_id(id) = bytes(4, id)'' (4-byte big-endian).
+** ''ser_ids(id<sub>1</sub>,…,id<sub>u</sub>) = ser_id(id_{(1)}) || … || ser_id(id_{(u)})'' where ''id_{(1)},…,id_{(u)}'' are the IDs sorted in ascending order.
+** The x-only encoding of a public key is ''xbytes(P)'' (32 bytes). This is what Taproot/BIP340 uses on chain.
+* Failure handling:
+** ''Fail'' means the algorithm aborts without output. When appropriate (e.g., in verification procedures), the failing party may be blamed as specified by the algorithm.
+* Security notes (normative):
+** Nonces must be unique per signature and uniformly distributed; reuse across messages leaks the secret share.
+** Any scalar derived from hash output (e.g., tweak scalars) must be reduced mod ''n''; if the algorithm requires nonzero, the value ''0'' must be rejected.
+** Scalar/point operations should be constant-time; secret scalars should be zeroized after use.
+** When an algorithm refers to the ''even-Y'' convention (''with_even_y''), this is to maintain BIP340 compatibility for challenges and X-only keys.
+** Signers should verify their own partial signature locally before publishing (recommended self-check).
+* Tags used in this document (domain separation):
+** ''"FROST/aux"'', ''"FROST/nonce"'', ''"FROST/noncecoef"'', ''"TapTweak"'', ''"BIP0340/challenge"''.
+
+=== Key Generation ===
+
+This procedure generates ''t-of-N'' threshold shares of a ''tweaked'' group secret, while publishing ''VSS'' commitments to the ''untweaked'' polynomial. Each signer verifies its share against those commitments ''plus'' the public x-only tweak ''t = hash_TapTweak(xbytes(A₀))'' derived from the first commitment.
+
+==== Objects and encodings ====
+* ''vss_commitment = (A<sub>0</sub>,…,A<sub>t−1</sub>)'' with ''A_k = a_k⋅G'' (each as ''33-byte'' compressed ''cbytes'').
+* ''secshare<sub>i</sub> = bytes(32, d<sub>i</sub>)'' (signer ''i''’s ''secret'' tweaked share).
+* ''pubshare<sub>i</sub> = cbytes(P<sub>i</sub><sup>Q</sup>)'' (signer ''i''’s ''public'' tweaked share).
+* ''grouppk_xonly = xbytes(Q)'' (''32-byte'' x-only group key).
+
+Identifier set: ''id<sub>i</sub> = i'' for ''i ∈ {1,…,N}''. All IDs must be distinct and publicly known.
+
+<div>
+Algorithm ''TrustedDealerKeygen(N, t)'':
+* Inputs:
+** ''N'' with ''1 &lt; N &lt; 2<sup>32</sup>''.
+** ''t'' with ''1 ≤ t ≤ N''.
+* Sample untweaked polynomial coefficients:
+** Choose ''A<sub>0</sub> ← [1..n−1]'' uniformly at random.
+** Choose ''A<sub>1</sub>,…,A<sub>t−1</sub> ← [0..n−1]'' uniformly at random.
+** Define ''f_P(X) = A<sub>0</sub> + A<sub>1</sub> X + … + A<sub>t−1</sub> X<sup>{t−1}</sup>mod n''.
+* Commitments to untweaked polynomial:
+** Let ''A<sub>0</sub> = s_P⋅G'' and for ''k = 1..t−1'', ''A_k = a_k⋅G''.
+** Set ''vss_commitment = (A<sub>0</sub>,…,A<sub>t−1</sub>)''.
+* Derive the public x-only tweak: <!-- What is the signifacnce of this tweak? Is it special that the tweaks described in the following procedure? -->
+** Let ''P = A<sub>0</sub>''.
+** Let ''tweak = int(hash<sub>TapTweak</sub>(xbytes(P))) mod n''.
+** Let ''g = 1'' if ''has_even_y(P)'', else ''g = −1 mod n''.
+** Define the tweaked group key ''Q = g⋅P + tweak⋅G''; fail if ''is_infinite(Q)''.
+* Produce tweaked shares for each participant ''i = 1..N'':
+** Let ''id = i''. 
+** Compute the ''public'' polynomial evaluation ''E = A<sub>0</sub> + id⋅A<sub>1</sub> + … + id<sup>t−1</sup>⋅A<sub>t−1</sub>'' (scalar powers and products reduced modulo ''n'').
+** Let the ''public tweaked share'' be ''P<sub>i</sub><sup>Q</sup> = g⋅E + tweak⋅G''.
+** Let the ''secret tweaked share'' be ''d<sub>i</sub> = ( g⋅f_P(id) + tweak ) mod n''.
+** Serialize ''secshare<sub>i</sub> = bytes(32, d<sub>i</sub>)'', ''pubshare<sub>i</sub> = cbytes(P<sub>i</sub><sup>Q</sup>)''.
+* Publish:
+** ''vss_commitment'', ''grouppk_xonly = xbytes(Q)'', ''(N, t)'' and the identifier list ''(1,…,N)''.
+* Deliver privately to each participant ''i'': ''(id<sub>i</sub> = i, secshare<sub>i</sub>)''. Optionally also deliver ''pubshare<sub>i</sub>''.
+* Output: ''(grouppk_xonly, vss_commitment, {(id<sub>i</sub>, secshare<sub>i</sub>[, pubshare<sub>i</sub>])}<sub>i=1</sub><sup>N</sup>)''.
+</div>
+Properties: For every ''i'', ''d<sub>i</sub>⋅G = P<sub>i</sub><sup>Q</sup>''. The public ''Q'' equals the x-only tweak of ''A₀'' using the above rule.
+<div>
+Algorithm ''ComputePubshare(id, vss_commitment)'':
+* Inputs:
+** ''id ∈ {1,…,N}''.
+** ''vss_commitment = (A<sub>0</sub>,…,A<sub>t−1</sub>)''.
+* Return the curve point ''E = A<sub>0</sub> + id⋅A<sub>1</sub> + … + id<sup>t−1</sup>⋅A<sub>t−1</sub>''.
+</div>
+
+<div>
+Algorithm ''VerifyShare(id, secshare, vss_commitment)'':
+* Inputs:
+** ''id ∈ {1,…,N}''.
+** ''secshare'' (32 bytes).
+** ''vss_commitment = (A<sub>0</sub>,…,A<sub>t−1</sub>)''.
+* Parse and basic checks:
+** Let ''d = int(secshare)''; fail if ''d = 0'' or ''d ≥ n''.
+** Let ''P = A<sub>0</sub>''; fail if ''is_infinite(P)''.
+* Recompute tweak and parity:
+** ''tweak = int(hash<sub>TapTweak</sub>(xbytes(P))) mod n''.
+** ''g = 1'' if ''has_even_y(P)'', else ''g = −1 mod n''.
+* Recompute expected public tweaked share:
+** ''E = ComputePubshare(id, vss_commitment)''.
+** ''P<sup>Q</sup> = g⋅E + tweak⋅G''.
+* Accept iff ''d⋅G = P<sup>Q</sup>''; otherwise fail.
+</div>
+
+<div>
+Algorithm ''GroupPubkeyFromCommitment(vss_commitment)'':
+* Inputs:
+** ''vss_commitment = (A<sub>0</sub>,…,A<sub>t−1</sub>)''.
+* Let ''P = A<sub>0</sub>'', ''tweak = int(hash<sub>TapTweak</sub>(xbytes(P))) mod n'', ''g = 1'' if ''has_even_y(P)'' else ''−1 mod n''.
+* Let ''Q = g⋅P + tweak⋅G''.
+* Return ''(Q, xbytes(Q))''.
+</div>
+
+=== Lagrange Coefficients and Group Public Key From a Subset ===
+
+<div>
+Internal Algorithm ''Lagrange(id<sub>1</sub>..id<sub>u</sub>, id)'':
+* Inputs:
+** Distinct identifiers ''id<sub>1</sub>..id<sub>u</sub>'' with ''u ≥ 1''.
+** Target ''id'' which must be one of ''id<sub>1</sub>..id<sub>u</sub>''.
+* Fail if any identifiers repeat.
+* Let ''num = 1, denom = 1'' (mod ''n'').
+* For each ''j = 1 .. u'' with ''id<sub>j</sub> ≠ id'':
+** ''num = (num ⋅ id<sub>j</sub>) mod n''
+** ''denom = (denom ⋅ (id<sub>j</sub> − id)) mod n''
+* Return ''λ = (num ⋅ modinv(denom)) mod n''.
+</div>
+
+<div>
+Algorithm ''GroupPubFromShares(id<sub>1</sub>..id<sub>u</sub>, pubshare<sub>1</sub>..pubshare<sub>u</sub>)'':
+* Inputs:
+** Distinct identifiers ''id<sub>1</sub>..id<sub>u</sub>'' with ''u ≥ t''.
+** Matching ''tweaked'' public shares ''pubshare<sub>1</sub>..pubshare<sub>u</sub>'' (each 33-byte ''cbytes'').
+* For ''i = 1 .. u'': let ''P<sub>i</sub> = cpoint(pubshare<sub>i</sub>)''; fail if any parse fails.
+* Let ''Q ='' point at infinity.
+* For ''i = 1 .. u'': let ''λ<sub>i</sub> = Lagrange(id<sub>1</sub>..id<sub>u</sub>, id<sub>i</sub>)''; set ''Q = Q + λ<sub>i</sub> ⋅ P<sub>i</sub>''.
+* Fail if ''is_infinite(Q)''.
+* Return ''cbytes(Q)''.
+</div>
+
+''Why this works.'' The dealer constructs tweaked shares ''d<sub>i</sub> = (g⋅f<sub>P</sub>(id<sub>i</sub>) + tweak) mod n'', so ''pubshare<sub>i</sub> = P<sub>i</sub><sup>Q</sup> = d<sub>i</sub>⋅G''. For any subset of size ≥ ''t'',
+''∑ λ<sub>i</sub> P<sub>i</sub><sup>Q</sup> = (∑ λ<sub>i</sub> d<sub>i</sub>)⋅G = s<sub>Q</sub>⋅G = Q'', as desired.
+
+=== Tweak Context (key-path only) ===
+
+This context tracks the current (potentially) tweaked aggregate key and accumulated tweak/parity for verification and partial-sig aggregation.
+
+It consists of:
+* ''Q'': an elliptic curve point (current aggregate key)
+* ''tacc'': an integer with ''0 ≤ tacc < n'' (accumulated tweak)
+* ''gacc'': ''1'' or ''−1 mod n'' (parity flips accumulated)
+
+We write ''Let (Q, gacc, tacc) = tweak_ctx''.
+
+<div>
+Algorithm ''TweakCtxInit(id<sub>1</sub>..id<sub>u</sub>, pubshare<sub>1</sub>..pubshare<sub>u</sub>)'':
+* Let ''grouppk_subset = GroupPubFromShares(id<sub>1</sub>..id<sub>u</sub>, pubshare<sub>1</sub>..pubshare<sub>u</sub>)''; fail if that fails (requires ''u ≥ t'').
+* Let ''Q = cpoint(grouppk_subset)''; fail if invalid or infinity.
+* Let ''gacc = 1'', ''tacc = 0''.
+* Return ''tweak_ctx = (Q, gacc, tacc)''.
+</div>
+
+<div>
+Algorithm ''GetXonlyPubkey(tweak_ctx)'':
+* Let ''(Q, _, _) = tweak_ctx''.
+* Return ''xbytes(Q)''.
+</div>
+
+<div>
+Algorithm ''GetPlainPubkey(tweak_ctx)'':
+* Let ''(Q, _, _) = tweak_ctx''.
+* Return ''cbytes(Q)''.
+</div>
+
+<div>
+Algorithm ''ApplyTweak(tweak_ctx, tweak, is_xonly_t)'':
+* Inputs:
+** ''tweak_ctx = (Q, gacc, tacc)''
+** ''tweak'': a 32-byte array
+** ''is_xonly_t'': boolean
+* If ''is_xonly_t'' and ''not has_even_y(Q)'': let ''g = −1 mod n''; else ''g = 1''.
+* Let ''t = int(tweak)''; fail if ''t ≥ n''.
+* Let ''Q' = g⋅Q + t⋅G''; fail if ''is_infinite(Q')''.
+* Let ''gacc' = (g ⋅ gacc) mod n'' and ''tacc' = (t + g⋅tacc) mod n''.
+* Return ''(Q', gacc', tacc')''.
+</div>
+
+Note: In the key-path-only setting, it is common to have no additional runtime tweaks (''v = 0''). The context remains for generality.
+
+=== Nonce Generation (per signer; two nonces) === <!-- Why 2 nonces? -->
+
+Each signer derives two secret nonces deterministically from fresh entropy and optional context, and publishes the corresponding two public nonce points.
+
+<div>
+Algorithm ''NonceGen(secshare?, pubshare?, aggpk?, m?, extra_in?)'':
+* Inputs (optional unless stated otherwise):
+** ''secshare'': a 32-byte scalar (optional; **if present, ''pubshare'' must be present**)
+** ''pubshare'': a 33-byte compressed point (required if ''secshare'' present)
+** ''aggpk'': a 32-byte x-only group public key (optional)
+** ''m'': the message bytes (optional)
+** ''extra_in'': a byte string with ''0 ≤ len(extra_in) ≤ 2<sup>32</sup> − 1'' (optional)
+* Draw ''rand0'': a fresh 32-byte uniformly random string.
+* If ''secshare'' is present:
+** Let ''rand = secshare ⊕ hash<sub>FROST/aux</sub>(rand0)''.
+* Else:
+** Let ''rand = rand0''.
+* If ''pubshare'' absent: set ''pubshare = empty_bytestring''.
+* If ''aggpk'' absent: set ''aggpk = empty_bytestring''.
+* If ''m'' absent: set ''m_prefixed = bytes(1, 0)''; else set ''m_prefixed = bytes(1, 1) || bytes(8, len(m)) || m''.
+* If ''extra_in'' absent: set ''extra_in = empty_bytestring''.
+* For ''i = 1, 2'':
+** ''k<sub>i</sub> = int(hash<sub>FROST/nonce</sub>(rand || bytes(1, len(pubshare)) || pubshare || bytes(1, len(aggpk)) || aggpk || m_prefixed || bytes(4, len(extra_in)) || extra_in || bytes(1, i − 1))) mod n''
+* Fail if ''k<sub>1</sub> = 0'' or ''k<sub>2</sub> = 0''.
+* Let ''R<sub>*,1</sub> = k<sub>1</sub>⋅G'' and ''R<sub>*,2</sub> = k<sub>2</sub>⋅G''.
+* Let ''pubnonce = cbytes(R<sub>*,1</sub>) || cbytes(R<sub>*,2</sub>)'' (66 bytes).
+* Let ''secnonce = bytes(32, k<sub>1</sub>) || bytes(32, k<sub>2</sub>)'' (64 bytes).
+* Return ''(secnonce, pubnonce)''.
+</div>
+
+''RECOMMENDED'': Implementations should store the signer's ''pubshare'' together with ''(k<sub>1</sub>,k<sub>2</sub>)'' in local ''secnonce'' state to prevent accidental reuse across keys. This does not change the wire/API format.
+
+=== Nonce Aggregation ===
+
+The aggregator sums each nonce column-wise to obtain the aggregate public nonces. Points that parse as infinity serialize as 33 zero bytes via ''cbytes_ext(·)''.
+
+<div>
+Algorithm ''NonceAgg(pubnonce<sub>1</sub>..pubnonce<sub>u</sub>)'':
+* Inputs:
+** ''u'' public nonces ''pubnonce<sub>1</sub>..pubnonce<sub>u</sub>'' (each 66 bytes)
+* For ''j = 1 .. 2'':
+** For ''i = 1 .. u'': let ''R<sub>i,j</sub> = cpoint(pubnonce<sub>i</sub>[(j−1)⋅33 : j⋅33])''; fail if invalid and blame signer ''i''.
+** Let ''R<sub>j</sub> = R<sub>1,j</sub> + … + R<sub>u,j</sub>'' (elliptic-curve addition).
+* Return ''aggnonce = cbytes_ext(R<sub>1</sub>) || cbytes_ext(R<sub>2</sub>)'' (66 bytes).
+</div>
+
+''Note'': ''R<sub>j</sub>'' may be infinity. ''cbytes_ext'' preserves this information for the session.
+
+=== Session Context ===
+
+A Session Context bundles all inputs relevant to one signing session.
+
+It consists of:
+* The number ''u'' of participants with ''t ≤ u ≤ n''.
+* The identifiers ''id<sub>1</sub>..id<sub>u</sub>'' (distinct positive integers).
+* The public shares ''pubshare<sub>1</sub>..pubshare<sub>u</sub>'' (33 bytes each; matching ''id<sub>1</sub>..id<sub>u</sub>'').
+* The aggregate public nonce ''aggnonce'' (66 bytes).
+* The number ''v'' of tweaks (''0 ≤ v < 2<sup>32</sup>'').
+* The tweaks ''tweak<sub>1</sub>..tweak<sub>v</sub>'' (32 bytes each).
+* The tweak modes ''is_xonly_t<sub>1</sub>..is_xonly_t<sub>v</sub>'' (booleans).
+* The message ''m'' (byte string).
+
+We write ''Let (u, id<sub>1</sub>..id<sub>u</sub>, pubshare<sub>1</sub>..pubshare<sub>u</sub>, aggnonce, v, tweak<sub>1</sub>..tweak<sub>v</sub>, is_xonly_t<sub>1</sub>..is_xonly_t<sub>v</sub>, m) = session_ctx''.
+
+<div>
+Algorithm ''SerializeIds(id<sub>1</sub>..id<sub>u</sub>)'':
+* Inputs:
+** Distinct identifiers ''id<sub>1</sub>..id<sub>u</sub>'' with ''u ≥ 1''.
+* Let ''ids_sorted'' be ''id<sub>1</sub>..id<sub>u</sub>'' sorted ascending.
+* Let ''res = empty_bytestring''.
+* For each ''id'' in ''ids_sorted'': set ''res = res || bytes(4, id)''.
+* Return ''res''.
+</div>
+
+<div>
+Algorithm ''GetSessionValues(session_ctx)'':
+* Let ''(u, id<sub>1</sub>..id<sub>u</sub>, pubshare<sub>1</sub>..pubshare<sub>u</sub>, aggnonce, v, tweak<sub>1</sub>..tweak<sub>v</sub>, is_xonly_t<sub>1</sub>..is_xonly_t<sub>v</sub>, m) = session_ctx''.
+* [Key context] Let ''tweak_ctx<sub>0</sub> = TweakCtxInit(id<sub>1</sub>..id<sub>u</sub>, pubshare<sub>1</sub>..pubshare<sub>u</sub>)''; fail if that fails.
+* For ''i = 1 .. v'': set ''tweak_ctx<sub>i</sub> = ApplyTweak(tweak_ctx<sub>i−1</sub>, tweak<sub>i</sub>, is_xonly_t<sub>i</sub>)''; fail if that fails.
+* Let ''(Q, gacc, tacc) = tweak_ctx<sub>v</sub>''.
+* Let ''ser_ids = SerializeIds(id<sub>1</sub>..id<sub>u</sub>)''.
+* [Binding coefficient] Let ''b = int(hash<sub>FROST/noncecoef</sub>(ser_ids || aggnonce || xbytes(Q) || m)) mod n''.
+* [Aggregate nonce points] Let ''R<sub>1</sub> = cpoint_ext(aggnonce[0:33])'' and ''R<sub>2</sub> = cpoint_ext(aggnonce[33:66])''; fail if either parse fails (nonzero but invalid).
+* Let ''R' = R<sub>1</sub> + b⋅R<sub>2</sub>''.
+* If ''is_infinite(R')'': set final nonce ''R = G''; else set ''R = R' ''.
+* [Challenge] Let ''e = int(hash<sub>BIP0340/challenge</sub>(xbytes(R) || xbytes(Q) || m)) mod n''.
+* Return ''(Q, gacc, tacc, b, R, e)''.
+</div>
+
+<div>
+Algorithm ''GetSessionLagrange(session_ctx, my_id)'':
+* Let ''(_, id<sub>1</sub>..id<sub>u</sub>, _, _, _, _, _, _) = session_ctx''.
+* Return ''Lagrange(id<sub>1</sub>..id<sub>u</sub>, my_id)''.
+</div>
+
+<div>
+Algorithm ''SessionHasPubshare(session_ctx, pk)'':
+* Let ''(_, _, pubshare<sub>1</sub>..pubshare<sub>u</sub>, _, _, _, _, _) = session_ctx''.
+* Return true iff ''pk'' equals one of ''pubshare<sub>1</sub>..pubshare<sub>u</sub>''.
+</div>
+
+=== Signing (per-participant partial signature) ===
+
+<div>
+Algorithm ''Sign(secnonce, secshare, my_id, session_ctx)'':
+* Inputs:
+** ''secnonce'': 64-byte secret nonce (never reused)
+** ''secshare'': 32-byte secret share of signer ''my_id''
+** ''my_id'': positive integer identifier of signer
+** ''session_ctx''
+* Let ''(Q, gacc, _, b, R, e) = GetSessionValues(session_ctx)''; fail if that fails.
+* Parse ''secnonce'': let ''k1' = int(secnonce[0:32])'', ''k2' = int(secnonce[32:64])''; fail if any ''k<sub>i</sub>' = 0'' or ''≥ n''.
+* If ''has_even_y(R)'': set ''k1 = k1'' and ''k2 = k2''; otherwise set ''k1 = n − k1'' and ''k2 = n − k2''.
+* Let ''d' = int(secshare)''; fail if ''d' = 0'' or ''d' ≥ n''.
+* Let ''P = d'⋅G'' and ''pk = cbytes(P)''.
+* Fail if ''SessionHasPubshare(session_ctx, pk)'' is false.
+* Let ''λ = GetSessionLagrange(session_ctx, my_id)''; fail if that fails.
+* Let ''g = 1'' if ''has_even_y(Q)'', otherwise ''g = −1 mod n''.
+* Let ''d = g⋅gacc⋅d' mod n''.
+* Let ''s = (k1 + b⋅k2 + e⋅λ⋅d) mod n''.
+* Let ''psig = bytes(32, s)''.
+* (Recommended self-check) Let ''pubnonce = cbytes(k1'⋅G) || cbytes(k2'⋅G)'' and fail if ''PartialSigVerifyInternal(psig, my_id, pubnonce, pk, session_ctx)'' fails.
+* Return ''psig''.
+</div>
+
+=== Partial Signature Verification ===
+
+<div>
+Algorithm ''PartialSigVerify(psig, id<sub>1</sub>..id<sub>u</sub>, pubnonce<sub>1</sub>..pubnonce<sub>u</sub>, pubshare<sub>1</sub>..pubshare<sub>u</sub>, tweak<sub>1</sub>..tweak<sub>v</sub>, is_xonly_t<sub>1</sub>..is_xonly_t<sub>v</sub>, m, i)'':
+* Inputs:
+** ''psig'': 32-byte partial signature from signer ''i''
+** ''id<sub>1</sub>..id<sub>u</sub>'': identifiers (distinct)
+** ''pubnonce<sub>1</sub>..pubnonce<sub>u</sub>'': 66-byte public nonces
+** ''pubshare<sub>1</sub>..pubshare<sub>u</sub>'': 33-byte public shares
+** ''tweak<sub>1</sub>..tweak<sub>v</sub>'', ''is_xonly_t<sub>1</sub>..is_xonly_t<sub>v</sub>'': tweaks and modes
+** ''m'': message
+** ''i'': index with ''1 ≤ i ≤ u''
+* Let ''aggnonce = NonceAgg(pubnonce<sub>1</sub>..pubnonce<sub>u</sub>)''; fail if that fails.
+* Let ''session_ctx = (u, id<sub>1</sub>..id<sub>u</sub>, pubshare<sub>1</sub>..pubshare<sub>u</sub>, aggnonce, v, tweak<sub>1</sub>..tweak<sub>v</sub>, is_xonly_t<sub>1</sub>..is_xonly_t<sub>v</sub>, m)''.
+* Run ''PartialSigVerifyInternal(psig, id<sub>i</sub>, pubnonce<sub>i</sub>, pubshare<sub>i</sub>, session_ctx)''.
+* Return success iff no failure occurred.
+</div>
+
+<div>
+Internal Algorithm ''PartialSigVerifyInternal(psig, my_id, pubnonce, pubshare, session_ctx)'':
+* Let ''(Q, gacc, _, b, R, e) = GetSessionValues(session_ctx)''; fail if that fails.
+* Let ''s = int(psig)''; fail if ''s ≥ n''.
+* Fail if ''SessionHasPubshare(session_ctx, pubshare)'' is false.
+* Parse ''pubnonce'': ''R<sup>⁎</sup><sub>1</sub> = cpoint(pubnonce[0:33])'', ''R<sup>⁎</sup><sub>2</sub> = cpoint(pubnonce[33:66])''; fail if either parse fails.
+* Let ''Re' = R<sup>⁎</sup><sub>1</sub> + b⋅R<sup>⁎</sup><sub>2</sub>''.
+* Let effective nonce ''Re = Re' '' if ''has_even_y(R)'', otherwise ''Re = −Re' ''.
+* Let ''P = cpoint(pubshare)''; fail if invalid.
+* Let ''λ = GetSessionLagrange(session_ctx, my_id)''; fail if that fails.
+* Let ''g = 1'' if ''has_even_y(Q)'', otherwise ''g = −1 mod n''.
+* Let ''g' = g⋅gacc mod n''.
+* Fail if ''s⋅G ≠ Re + e⋅λ⋅g'⋅P''.
+* Return success.
+</div>
+
+=== Partial Signature Aggregation ===
+
+<div>
+Algorithm ''PartialSigAgg(psig<sub>1</sub>..psig<sub>u</sub>, id<sub>1</sub>..id<sub>u</sub>, session_ctx)'':
+* Inputs:
+** ''psig<sub>1</sub>..psig<sub>u</sub>'': ''u'' partial signatures (32 bytes each)
+** ''id<sub>1</sub>..id<sub>u</sub>'': identifiers matching the session
+** ''session_ctx''
+* Let ''(Q, _, tacc, _, _, R, e) = GetSessionValues(session_ctx)''; fail if that fails.
+* For ''i = 1 .. u'': let ''s<sub>i</sub> = int(psig<sub>i</sub>)''; fail if ''s<sub>i</sub> ≥ n'' and blame ''id<sub>i</sub>''.
+* Let ''g = 1'' if ''has_even_y(Q)'', otherwise ''g = −1 mod n''.
+* Let ''s = (s<sub>1</sub> + … + s<sub>u</sub> + e⋅g⋅tacc) mod n''.
+* Return final signature ''sig = xbytes(R) || bytes(32, s)''.
+</div>
+
+=== Dealing with Infinity in Nonce Aggregation ===
+If ''R' = R<sub>1</sub> + b⋅R<sub>2</sub>'' equals the point at infinity, set ''R = G''. The effective nonces for verification are still derived from each signer’s own ''(R<sup>*</sup><sub>1</sub>, R<sup>*</sup><sub>2</sub>)'' and parity-adjusted using ''has_even_y(R)''.
+
+=== Error Attribution (Blame Rules) ===
+
+In ''NonceAgg'', if ''pubnonce<sub>i</sub>'' fails to parse, blame signer ''i''.
+
+In ''PartialSigVerifyInternal'', if ''pubnonce'' halves fail to parse, blame that signer.
+
+In ''PartialSigAgg'', if any ''psig<sub>i</sub>'' yields ''s<sub>i</sub> ≥ n'', blame signer ''i''.
+
+If ''SessionHasPubshare'' fails for a signer, treat the partial as invalid for that session.
+
+=== Implementation Notes ===
+
+Implementations should cache: ''(Q, gacc, tacc)'', the binding coefficient ''b'', and parsed ''R<sub>1</sub>, R<sub>2</sub>'' inside a “keygen/session cache”.
+
+Constant-time scalar arithmetic and zeroization of ''secnonce''/''secshare'' are recommended.
+
+Domain separation tags MUST match exactly: ''"FROST/aux"'', ''"FROST/nonce"'', ''"FROST/noncecoef"'', ''"TapTweak"'', ''"BIP0340/challenge"''.
+
+== Test Vectors ==
+
+== Security Considerations ==
+(Nonce reuse, constant-time, zeroization, domain separation tags, etc.)
+
+== References ==
+- BIP340/341/342
+- MuSig2 (BIP-327)
+- FROST papers/RFCs (TD context)
+- secp256k1lib and related docs
