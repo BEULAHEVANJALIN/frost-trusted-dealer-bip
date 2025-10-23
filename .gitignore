@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.dist/
+build/
+dist/
+
+# C build
+.external/
+*.o
+*.a
+*.so
+tools/gen_vectors
+tools/build/
+
+# Editors
+.DS_Store
+.vscode/
+.idea/
